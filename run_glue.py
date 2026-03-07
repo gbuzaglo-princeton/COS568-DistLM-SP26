@@ -122,8 +122,13 @@ def train(args, train_dataset, model, tokenizer):
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
+            # Print the loss for the first 5 minibatches of the first epoch
+            if _ == 0 and step < 5:
+                print(f"Minibatch {step + 1} loss: {loss.item()}")
+
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
+            
 
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
