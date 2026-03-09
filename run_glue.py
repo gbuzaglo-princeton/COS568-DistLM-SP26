@@ -71,7 +71,10 @@ def train(args, train_dataset, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_device_train_batch_size
-    train_sampler = RandomSampler(train_dataset)
+    if args.local_rank != -1:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=args.world_size, rank=args.local_rank)
+    else:
+        train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
@@ -143,6 +146,30 @@ def train(args, train_dataset, model, tokenizer):
 
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
+                ##################################################
+                # TASK 2(a): Gather and Scatter Gradients
+                if args.local_rank != -1:
+                    for param in model.parameters():
+                        # Only sync parameters that have gradients
+                        if param.grad is not None:
+                            # 1. Gather all gradients to node 0
+                            if args.local_rank == 0:
+                                gather_list = [torch.zeros_like(param.grad.data) for _ in range(args.world_size)]
+                            else:
+                                gather_list = None
+                            
+                            torch.distributed.gather(param.grad.data, gather_list, dst=0)
+                            
+                            # 2. Average the gradients (only node 0 has the full list)
+                            if args.local_rank == 0:
+                                avg_grad = sum(gather_list) / args.world_size
+                                scatter_list = [avg_grad for _ in range(args.world_size)]
+                            else:
+                                scatter_list = None
+                                
+                            # 3. Scatter the averaged gradients back to all nodes
+                            torch.distributed.scatter(param.grad.data, scatter_list, src=0)
+                ##################################################
                 ##################################################
                 # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
                 optimizer.step()
@@ -353,7 +380,19 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
+    parser.add_argument("--master_ip", type=str, default="", help="Master node IP")
+    parser.add_argument("--master_port", type=str, default="12345", help="Master node port")
+    parser.add_argument("--world_size", type=int, default=1, help="Number of nodes")
     args = parser.parse_args()
+
+    if args.local_rank != -1:
+        init_method = f"tcp://{args.master_ip}:{args.master_port}"
+        torch.distributed.init_process_group(
+            backend='gloo', 
+            init_method=init_method, 
+            world_size=args.world_size, 
+            rank=args.local_rank
+        )
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
