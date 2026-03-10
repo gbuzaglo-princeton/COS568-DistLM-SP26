@@ -157,41 +157,41 @@ def train(args, train_dataset, model, tokenizer):
   
               tr_loss += loss.item()
               if (step + 1) % args.gradient_accumulation_steps == 0:
-                  # ##################################################
-                  # # TASK 2(a): Gather and Scatter Gradients
-                  # if args.local_rank != -1:
-                  #     for param in model.parameters():
-                  #         # Only sync parameters that have gradients
-                  #         if param.grad is not None:
-                  #             # 1. Gather all gradients to node 0
-                  #             if args.local_rank == 0:
-                  #                 gather_list = [torch.zeros_like(param.grad.data) for _ in range(args.world_size)]
-                  #             else:
-                  #                 gather_list = None
-                              
-                  #             torch.distributed.gather(param.grad.data, gather_list, dst=0)
-                              
-                  #             # 2. Average the gradients (only node 0 has the full list)
-                  #             if args.local_rank == 0:
-                  #                 avg_grad = sum(gather_list) / args.world_size
-                  #                 scatter_list = [avg_grad for _ in range(args.world_size)]
-                  #             else:
-                  #                 scatter_list = None
-                                  
-                  #             # 3. Scatter the averaged gradients back to all nodes
-                  #             torch.distributed.scatter(param.grad.data, scatter_list, src=0)
-                  # ##################################################
                   ##################################################
-                  # TASK 2(b): Gradient Synchronization with all_reduce
+                  # TASK 2(a): Gather and Scatter Gradients
                   if args.local_rank != -1:
                       for param in model.parameters():
+                          # Only sync parameters that have gradients
                           if param.grad is not None:
-                              # 1. Sum all the gradients across all nodes simultaneously
-                              torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
+                              # 1. Gather all gradients to node 0
+                              if args.local_rank == 0:
+                                  gather_list = [torch.zeros_like(param.grad.data) for _ in range(args.world_size)]
+                              else:
+                                  gather_list = None
                               
-                              # 2. Divide by the number of nodes to get the exact average
-                              param.grad.data /= args.world_size
+                              torch.distributed.gather(param.grad.data, gather_list, dst=0)
+                              
+                              # 2. Average the gradients (only node 0 has the full list)
+                              if args.local_rank == 0:
+                                  avg_grad = sum(gather_list) / args.world_size
+                                  scatter_list = [avg_grad for _ in range(args.world_size)]
+                              else:
+                                  scatter_list = None
+                                  
+                              # 3. Scatter the averaged gradients back to all nodes
+                              torch.distributed.scatter(param.grad.data, scatter_list, src=0)
                   ##################################################
+                  # ##################################################
+                  # # TASK 2(b): Gradient Synchronization with all_reduce
+                  # if args.local_rank != -1:
+                  #     for param in model.parameters():
+                  #         if param.grad is not None:
+                  #             # 1. Sum all the gradients across all nodes simultaneously
+                  #             torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
+                              
+                  #             # 2. Divide by the number of nodes to get the exact average
+                  #             param.grad.data /= args.world_size
+                  # ##################################################
                   ##################################################
                   # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
                   optimizer.step()
