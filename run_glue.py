@@ -47,6 +47,8 @@ from pytorch_transformers import AdamW, WarmupLinearSchedule
 from utils_glue import (compute_metrics, convert_examples_to_features,
                         output_modes, processors)
 
+import torch.profiler
+
 logger = logging.getLogger(__name__)
 
 ALL_MODELS = sum((tuple(conf.pretrained_config_archive_map.keys()) for conf in (BertConfig, XLNetConfig, XLMConfig, RobertaConfig)), ())
@@ -116,83 +118,95 @@ def train(args, train_dataset, model, tokenizer):
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        for step, batch in enumerate(epoch_iterator):
-            model.train()
-            batch = tuple(t.to(args.device) for t in batch)
-            inputs = {'input_ids':      batch[0],
-                      'attention_mask': batch[1],
-                      'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,  # XLM don't use segment_ids
-                      'labels':         batch[3]}
-            outputs = model(**inputs)
-            loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
+        # TASK 4: Official Profiler Setup
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU],
+            schedule=torch.profiler.schedule(wait=1, warmup=0, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler('/tmp/log/'),
+            record_shapes=True,
+            with_stack=True
+        ) as prof:
+            for step, batch in enumerate(epoch_iterator):
+              model.train()
+              batch = tuple(t.to(args.device) for t in batch)
+              inputs = {'input_ids':      batch[0],
+                        'attention_mask': batch[1],
+                        'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet'] else None,  # XLM don't use segment_ids
+                        'labels':         batch[3]}
+              outputs = model(**inputs)
+              loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
+  
+              # Print the loss for the first 5 minibatches of the first epoch
+              if _ == 0 and step < 5:
+                  print(f"Minibatch {step + 1} loss: {loss.item()}")
+  
+              if args.gradient_accumulation_steps > 1:
+                  loss = loss / args.gradient_accumulation_steps
+              
+  
+              if args.fp16:
+                  with amp.scale_loss(loss, optimizer) as scaled_loss:
+                      scaled_loss.backward()
+                  torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
+              else:
+                  ##################################################
+                  # TODO(cos568): perform backward pass here (expect one line of code)
+                  loss.backward()
+                  ##################################################
+                  torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+  
+              tr_loss += loss.item()
+              if (step + 1) % args.gradient_accumulation_steps == 0:
+                  # ##################################################
+                  # # TASK 2(a): Gather and Scatter Gradients
+                  # if args.local_rank != -1:
+                  #     for param in model.parameters():
+                  #         # Only sync parameters that have gradients
+                  #         if param.grad is not None:
+                  #             # 1. Gather all gradients to node 0
+                  #             if args.local_rank == 0:
+                  #                 gather_list = [torch.zeros_like(param.grad.data) for _ in range(args.world_size)]
+                  #             else:
+                  #                 gather_list = None
+                              
+                  #             torch.distributed.gather(param.grad.data, gather_list, dst=0)
+                              
+                  #             # 2. Average the gradients (only node 0 has the full list)
+                  #             if args.local_rank == 0:
+                  #                 avg_grad = sum(gather_list) / args.world_size
+                  #                 scatter_list = [avg_grad for _ in range(args.world_size)]
+                  #             else:
+                  #                 scatter_list = None
+                                  
+                  #             # 3. Scatter the averaged gradients back to all nodes
+                  #             torch.distributed.scatter(param.grad.data, scatter_list, src=0)
+                  # ##################################################
+                  # ##################################################
+                  # # TASK 2(b): Gradient Synchronization with all_reduce
+                  # if args.local_rank != -1:
+                  #     for param in model.parameters():
+                  #         if param.grad is not None:
+                  #             # 1. Sum all the gradients across all nodes simultaneously
+                  #             torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
+                              
+                  #             # 2. Divide by the number of nodes to get the exact average
+                  #             param.grad.data /= args.world_size
+                  # ##################################################
+                  ##################################################
+                  # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
+                  optimizer.step()
+                  ##################################################
+                  scheduler.step() # Update learning rate schedule
+                  model.zero_grad()
+                  global_step += 1
 
-            # Print the loss for the first 5 minibatches of the first epoch
-            if _ == 0 and step < 5:
-                print(f"Minibatch {step + 1} loss: {loss.item()}")
-
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-            
-
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
-            else:
-                ##################################################
-                # TODO(cos568): perform backward pass here (expect one line of code)
-                loss.backward()
-                ##################################################
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
-            tr_loss += loss.item()
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                # ##################################################
-                # # TASK 2(a): Gather and Scatter Gradients
-                # if args.local_rank != -1:
-                #     for param in model.parameters():
-                #         # Only sync parameters that have gradients
-                #         if param.grad is not None:
-                #             # 1. Gather all gradients to node 0
-                #             if args.local_rank == 0:
-                #                 gather_list = [torch.zeros_like(param.grad.data) for _ in range(args.world_size)]
-                #             else:
-                #                 gather_list = None
-                            
-                #             torch.distributed.gather(param.grad.data, gather_list, dst=0)
-                            
-                #             # 2. Average the gradients (only node 0 has the full list)
-                #             if args.local_rank == 0:
-                #                 avg_grad = sum(gather_list) / args.world_size
-                #                 scatter_list = [avg_grad for _ in range(args.world_size)]
-                #             else:
-                #                 scatter_list = None
-                                
-                #             # 3. Scatter the averaged gradients back to all nodes
-                #             torch.distributed.scatter(param.grad.data, scatter_list, src=0)
-                # ##################################################
-                # ##################################################
-                # # TASK 2(b): Gradient Synchronization with all_reduce
-                # if args.local_rank != -1:
-                #     for param in model.parameters():
-                #         if param.grad is not None:
-                #             # 1. Sum all the gradients across all nodes simultaneously
-                #             torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
-                            
-                #             # 2. Divide by the number of nodes to get the exact average
-                #             param.grad.data /= args.world_size
-                # ##################################################
-                ##################################################
-                # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
-                optimizer.step()
-                ##################################################
-                scheduler.step() # Update learning rate schedule
-                model.zero_grad()
-                global_step += 1
-
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
+                  prof.step()  # Tell profiler that one iteration finished
+                  if step + 1 >= 4:  # Stop after we have the 3 active steps
+                    break
+  
+              if args.max_steps > 0 and global_step > args.max_steps:
+                  epoch_iterator.close()
+                  break
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
