@@ -181,17 +181,17 @@ def train(args, train_dataset, model, tokenizer):
                   #             # 3. Scatter the averaged gradients back to all nodes
                   #             torch.distributed.scatter(param.grad.data, scatter_list, src=0)
                   # ##################################################
-                  # ##################################################
-                  # # TASK 2(b): Gradient Synchronization with all_reduce
-                  # if args.local_rank != -1:
-                  #     for param in model.parameters():
-                  #         if param.grad is not None:
-                  #             # 1. Sum all the gradients across all nodes simultaneously
-                  #             torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
+                  ##################################################
+                  # TASK 2(b): Gradient Synchronization with all_reduce
+                  if args.local_rank != -1:
+                      for param in model.parameters():
+                          if param.grad is not None:
+                              # 1. Sum all the gradients across all nodes simultaneously
+                              torch.distributed.all_reduce(param.grad.data, op=torch.distributed.ReduceOp.SUM)
                               
-                  #             # 2. Divide by the number of nodes to get the exact average
-                  #             param.grad.data /= args.world_size
-                  # ##################################################
+                              # 2. Divide by the number of nodes to get the exact average
+                              param.grad.data /= args.world_size
+                  ##################################################
                   ##################################################
                   # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
                   optimizer.step()
@@ -465,8 +465,8 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)
-    if args.local_rank != -1:
-        model = DDP(model) # This single line replaces all the manual math!
+    # if args.local_rank != -1:
+    #     model = DDP(model) # This single line replaces all the manual math!
 
     logger.info("Training/evaluation parameters %s", args)
 
