@@ -136,9 +136,8 @@ def train(args, train_dataset, model, tokenizer):
               outputs = model(**inputs)
               loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
   
-              # Print the loss for the first 5 minibatches of the first epoch
-              if _ == 0 and step < 5:
-                  print(f"Minibatch {step + 1} loss: {loss.item()}")
+              # Print the loss for EVERY minibatch to get the full curve
+              print(f"Node {args.local_rank} - Step {step + 1}: Loss = {loss.item()}")
   
               if args.gradient_accumulation_steps > 1:
                   loss = loss / args.gradient_accumulation_steps
@@ -199,10 +198,10 @@ def train(args, train_dataset, model, tokenizer):
                   scheduler.step() # Update learning rate schedule
                   model.zero_grad()
                   global_step += 1
-
                   prof.step()  # Tell profiler that one iteration finished
-                  if step + 1 >= 4:  # Stop after we have the 3 active steps
-                    break
+                  # COMMENTED OUT SO IT RUNS ALL 39 STEPS!
+                  # if step + 1 >= 4:  
+                  #   break
   
               if args.max_steps > 0 and global_step > args.max_steps:
                   epoch_iterator.close()
